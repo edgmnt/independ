@@ -1,0 +1,147 @@
+#!/bin/bash
+
+#
+# Copyright (C) 2013    Eduard - Gabriel Munteanu <edgmnt@gmail.com>
+#						  <eduard.munteanu@linux360.ro>
+#
+# This program is free software. It comes without any warranty, to
+# the extent permitted by applicable law. You can redistribute it
+# and/or modify it under the terms of the Do What The Fuck You Want
+# To Public License, Version 2, as published by Sam Hocevar. See
+# http://www.wtfpl.net/ for more details.
+#
+# >
+# >             DO WHAT THE FUCK YOU WANT TO PUBLIC LICENSE
+# >                     Version 2, December 2004
+# > 
+# >  Copyright (C) 2004 Sam Hocevar
+# >   22 rue de Plaisance, 75014 Paris, France
+# >  Everyone is permitted to copy and distribute verbatim or modified
+# >  copies of this license document, and changing it is allowed as long
+# >  as the name is changed.
+# > 
+# >             DO WHAT THE FUCK YOU WANT TO PUBLIC LICENSE
+# >    TERMS AND CONDITIONS FOR COPYING, DISTRIBUTION AND MODIFICATION
+# > 
+# >   0. You just DO WHAT THE FUCK YOU WANT TO.
+# > 
+
+set -u
+
+check_file() {
+	[[ -f "$1" && -r "$1" ]] || {
+		echo "Error: $1 isn't a readable regular file!" 1>&2
+		exit 1
+	}
+}
+
+direct_depends() {
+	declare lib
+	check_file $1
+	ldd -r $1 \
+		| sed -nre 's/^\t[^ ]+ => ([^ ]+) \(0x[0-9a-f]+\)$/\1/p' \
+		| while read lib
+	do
+		echo "$lib"
+	done
+}
+
+indirect_depends() {
+	declare obj
+	for obj in $@; do
+		declare ddep=`direct_depends $obj`
+		[[ "$ddep" = "" ]] && continue
+		echo "$ddep"
+		indirect_depends $ddep
+	done
+}
+
+indent_output() {
+	sed -e "s/^/$1/"
+}
+
+install_file() {
+	declare target_dir=$1
+	declare rpath=$2
+	declare target=$3
+
+	declare installed_target="$target_dir/$(basename $target)"
+	cp -n "$target" "$installed_target"
+	patchelf --set-rpath "$rpath" \
+		 "$installed_target" 2>&1 | indent_output "\t\t" 1>&2
+}
+
+show_help() {
+	cat <<-EOF
+		Usage: independ [-hv | -i DIRECTORY] [--] [TARGET ...]
+		Detect library dependencies of the targets and optionally
+		install them together so they can be moved to another system.
+
+		  -h				show usage and exit
+		  -i DIRECTORY			install all targets and
+		  				  dependencies in DIRECTORY
+		  -v				verbose output
+
+		If not asked to install, it will print the list of dependencies
+		to standard output, one per line and nothing else.
+	EOF
+}
+
+declare opt
+declare opt_verbose=false
+declare opt_install=""
+while getopts "hi:v-" opt
+do
+	case $opt in
+		h)
+			show_help
+			exit 0
+			;;
+		i)
+			shift
+			opt_install="$1"
+			shift
+			;;
+		v)
+			opt_verbose=true
+			shift
+			;;
+		-)
+			shift
+			break
+			;;
+		?)
+			echo "Error: invalid option." 1>&2
+			show_help
+			exit 1
+			;;
+	esac
+done
+
+declare deps=`indirect_depends $@ | sort -u`
+if [[ "$opt_install" = "" ]]; then
+	[[ "$deps" != "" ]] && echo "$deps"
+else
+	declare target_dir="$opt_install"
+	declare libs_dir="$opt_install/.libs"
+	mkdir -p "$libs_dir" || {
+		echo "Error: could not create directory $libs_dir" 1>&2 
+		exit 1
+	}
+
+	echo "Installing targets..."
+	declare target
+	for target in $@; do
+		[[ $opt_verbose ]] && echo -e "\t- $(basename $target)"
+		install_file "$target_dir" '$ORIGIN/.libs/' "$target"
+	done
+
+	echo "Installing dependencies..."
+	declare dep
+	for dep in $deps; do
+		[[ $opt_verbose ]] && echo -e "\t- $(basename $dep)"
+		install_file "$libs_dir" '$ORIGIN' "$dep"
+	done
+	echo "Done."
+fi
+
